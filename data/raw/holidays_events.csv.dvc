@@ -1,0 +1,6 @@
+outs:
+- md5: 6a71fe2fb783e8e6758a53d417b75872
+  size: 22309
+  isexec: true
+  hash: md5
+  path: holidays_events.csv

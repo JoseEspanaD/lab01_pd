@@ -1,0 +1,6 @@
+outs:
+- md5: 4767ef51a4ff57e65538afa9b1c5e1b5
+  size: 20580
+  isexec: true
+  hash: md5
+  path: oil.csv

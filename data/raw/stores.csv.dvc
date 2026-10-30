@@ -1,0 +1,6 @@
+outs:
+- md5: 8414fbafbc7dcb33498d1a3c0cf2fda6
+  size: 1387
+  isexec: true
+  hash: md5
+  path: stores.csv
