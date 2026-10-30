@@ -1,0 +1,6 @@
+outs:
+- md5: db5fa89caf46386aba0ed5bad7a403c7
+  size: 1552637
+  isexec: true
+  hash: md5
+  path: transactions.csv
