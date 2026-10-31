@@ -76,11 +76,10 @@ def _parse_path(path: Path, inbox_dir: Path) -> _Delivery | None:
     return _Delivery(source, observed, available, revision, delivery_id, path)
 
 
-def select_deliveries(inbox_dir: Path, cutoff_at: datetime) -> list[Path]:
-    """Return one immutable CSV path per source and date, ordered by those keys.
+def list_deliveries(inbox_dir: Path, cutoff_at: datetime) -> list[_Delivery]:
+    """Validate inbox metadata once and list deliveries through cutoff_at.
 
-    The selector reads only directory entries and path metadata. Staging
-    directories are ignored because the producer has not published them yet.
+    Staging directories are ignored because the producer has not published them.
     """
     if not isinstance(cutoff_at, datetime) or cutoff_at.tzinfo is None:
         raise ValueError("cutoff_at debe ser un datetime UTC con zona horaria")
@@ -94,7 +93,7 @@ def select_deliveries(inbox_dir: Path, cutoff_at: datetime) -> list[Path]:
 
     seen_ids: set[str] = set()
     seen_revisions: set[tuple[str, date, int]] = set()
-    selected: dict[tuple[str, date], _Delivery] = {}
+    deliveries: list[_Delivery] = []
     for path in sorted(inbox_dir.rglob("*")):
         parts = path.relative_to(inbox_dir).parts
         if any(part.startswith(".staging-") for part in parts):
@@ -122,12 +121,20 @@ def select_deliveries(inbox_dir: Path, cutoff_at: datetime) -> list[Path]:
         seen_revisions.add(revision_key)
 
         if delivery.available_at <= cutoff_at:
-            key = (delivery.source, delivery.observation_date)
-            previous = selected.get(key)
-            if previous is None or (delivery.available_at, delivery.revision) > (
-                previous.available_at,
-                previous.revision,
-            ):
-                selected[key] = delivery
+            deliveries.append(delivery)
+
+    return deliveries
+
+
+def select_deliveries(inbox_dir: Path, cutoff_at: datetime) -> list[Path]:
+    """Return one immutable CSV path per source and date, ordered by those keys."""
+    selected: dict[tuple[str, date], _Delivery] = {}
+    for delivery in list_deliveries(inbox_dir, cutoff_at):
+        key = (delivery.source, delivery.observation_date)
+        previous = selected.get(key)
+        if previous is None or (delivery.available_at, delivery.revision) > (
+            previous.available_at, previous.revision
+        ):
+            selected[key] = delivery
 
     return [selected[key].path for key in sorted(selected)]
