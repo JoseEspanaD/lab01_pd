@@ -5,12 +5,12 @@ Proyecto de Product Development con datos públicos de Corporación Favorita. El
 ## Estructura mínima
 
 ```text
-src/inventory/       Paquete Python: simulación, selección e ingesta de cinco fuentes
+src/inventory/       Paquete Python: simulación, ingesta y preparación de datos
 tests/               Pruebas pytest con datos sintéticos
 data/raw/            Cinco CSV originales, asociados a archivos .dvc
 data/inbox/          Entregas simuladas e inmutables; entrada de solo lectura para la ingesta
 data/processed/      Salidas derivadas previstas
-DECISIONES.md        Contrato de entregas y cortes históricos (DEC-001)
+DECISIONES.md        Contratos de entregas y preparación histórica (DEC-001/002)
 ```
 
 Los CSV y las entregas generadas están excluidos de Git. Los archivos `data/raw/*.csv.dvc` sí se versionan.
@@ -68,4 +68,21 @@ Los simuladores de fuentes fechadas reciben una fecha de observación y generan 
 
 Las pruebas pytest usan CSV y bandejas temporales. La prueba `tests/test_all_sources_integration.py` verifica las cinco fuentes en un mismo corte, la disponibilidad, una corrección y la estabilidad de un corte anterior; `tests/test_sales_flow_integration.py` cubre además una corrección externa de ventas.
 
-La disponibilidad D+1 y T0 son supuestos, no fechas reales de publicación. El catálogo de `stores` se trata como estable desde T0 y los feriados futuros no se adelantan; consulta las limitaciones de [DEC-001](DECISIONES.md) antes de usar estos datos en predicciones. Aún no hay generación de `data/processed/`, preparación de features, entrenamiento, pronósticos, recomendaciones ni un flujo de Airflow operativo.
+## Preparación de entrenamiento
+
+`inventory.data_preparation.prepare_training_data(inbox_dir, start_date, end_date, cutoff_at)` devuelve una lista ordenada de `TrainingExample` en memoria. `start_date` y `end_date` son fechas objetivo inclusivas; `cutoff_at` es un `datetime` UTC que limita las etiquetas de ventas disponibles para entrenar. No escribe archivos. Por ejemplo:
+
+```python
+from datetime import date, datetime, timezone
+from pathlib import Path
+from inventory.data_preparation import prepare_training_data
+
+rows = prepare_training_data(
+    Path("data/inbox"), date(2017, 8, 10), date(2017, 8, 15),
+    datetime(2017, 8, 16, 6, tzinfo=timezone.utc),
+)
+```
+
+Cada fila corresponde a una fecha objetivo, tienda y familia. Para pronosticar ventas de `D`, sus `features` se reconstruyen únicamente con entregas disponibles en `D−1` a las 06:00 UTC. La preparación recorre una vez los metadatos de las entregas y avanza por sus revisiones disponibles a medida que cambian los cortes de las filas; cada lote seleccionado se lee una sola vez durante ese recorrido. La etiqueta `label_sales` está separada de `features` y debe estar disponible en el corte de preparación. Solo se crean filas para combinaciones tienda–familia ya observadas en ventas antes de su corte; las series nuevas quedan fuera. Se incluyen día de semana y mes de `D`, atributos de tienda, última venta y promoción conocidas, media de ventas observadas en los siete días históricos posibles (`D−8` a `D−2`), últimas transacciones y precio del petróleo conocidos, edades de esos datos y número de eventos conocidos en esa ventana que aplican por ámbito nacional, provincia o ciudad. El último precio del petróleo puede ser `None` si la última cotización entregada estaba vacía. Las demás observaciones faltantes también se representan con `None`; el conteo de eventos conocidos es cero cuando no hay ninguno. No se imputan valores ni se usan eventos de `D` anticipadamente.
+
+La disponibilidad D+1 y T0 son supuestos, no fechas reales de publicación. El catálogo de `stores` se trata como estable desde T0 y los feriados futuros no se adelantan; consulta las limitaciones de [DEC-001 y DEC-002](DECISIONES.md) antes de usar estos datos en predicciones. Aún no hay persistencia en `data/processed/`, entrenamiento, pronósticos, recomendaciones ni un flujo de Airflow operativo.
