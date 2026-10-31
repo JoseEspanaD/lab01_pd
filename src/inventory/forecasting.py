@@ -1,6 +1,7 @@
 """Seven daily forecasts from one weekly historical cutoff, with temporal evaluation."""
 
 import json
+import hashlib
 import math
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -293,6 +294,36 @@ def should_replace(incumbent: Metrics, challenger: Metrics, costs: CostPolicy) -
 
 
 @dataclass(frozen=True)
+class SelectedForecast:
+    """Selected model and daily calibration with cutoffs derived during evaluation."""
+
+    name: str
+    model: MeanBaseline | RidgeForecaster
+    daily_calibration: ResidualCalibration
+    model_available_at: datetime
+    daily_calibration_available_at: datetime
+    model_state_sha256: str
+
+
+def model_state_sha256(model: MeanBaseline | RidgeForecaster) -> str:
+    """Fingerprint the selected model state so later mutation cannot reuse its cutoff."""
+    if type(model) is MeanBaseline:
+        state = {"type": "mean_baseline"}
+    elif type(model) is RidgeForecaster and all(
+        value is not None for value in (model.means, model.scales, model.coefficients)
+    ):
+        state = {
+            "type": "ridge", "penalty": model.penalty,
+            "means": model.means, "scales": model.scales,
+            "coefficients": model.coefficients,
+        }
+    else:
+        raise ValueError("El modelo seleccionado no tiene un estado acreditable")
+    encoded = json.dumps(state, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
 class EvaluationResult:
     baseline: MeanBaseline
     ml: RidgeForecaster
@@ -304,6 +335,9 @@ class EvaluationResult:
     test_baseline: Metrics
     test_ml: Metrics
     selected_model: str
+    selected_forecast: SelectedForecast
+    selection_start: date
+    test_start: date
     ridge_penalty: float
     train_rows: int
     calibration_rows: int
@@ -363,6 +397,14 @@ def evaluate_models(inbox_dir: Path, train_start: date, validation_start: date,
     )
     # Do not inspect test labels until the Ridge penalty and replacement decision are fixed.
     selected_model = "ml" if should_replace(validation_baseline, validation_ml, costs) else "baseline"
+    selected_forecast = SelectedForecast(
+        selected_model,
+        ml if selected_model == "ml" else baseline,
+        ml_calibration if selected_model == "ml" else baseline_calibration,
+        _prediction_cutoff(test_start),
+        _prediction_cutoff(selection_start),
+        model_state_sha256(ml if selected_model == "ml" else baseline),
+    )
     test = prepare_forecast_examples(
         inbox_dir, test_start, last_test_start, report_cutoff_at, require_labels=True,
     )
@@ -377,6 +419,6 @@ def evaluate_models(inbox_dir: Path, train_start: date, validation_start: date,
     return EvaluationResult(
         baseline, ml, baseline_calibration, ml_calibration, costs,
         validation_baseline, validation_ml, test_baseline, test_ml,
-        selected_model, ml.penalty,
+        selected_model, selected_forecast, selection_start, test_start, ml.penalty,
         len(train), len(calibration), len(selection), len(test),
     )

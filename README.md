@@ -5,13 +5,13 @@ Proyecto de Product Development con datos públicos de Corporación Favorita. El
 ## Estructura mínima
 
 ```text
-src/inventory/       Paquete Python: ingesta, preparación, pronósticos y evaluación
+src/inventory/       Paquete Python: ingesta, preparación, pronósticos y pedidos sugeridos
 tests/               Pruebas pytest con datos sintéticos
 data/raw/            Cinco CSV originales, asociados a archivos .dvc
 data/inbox/          Entregas simuladas e inmutables; entrada de solo lectura para la ingesta
 data/processed/      Salidas derivadas previstas
 config/              Costos y umbral de reemplazo versionados
-DECISIONES.md        Contratos y decisiones de modelado (DEC-001 a DEC-005)
+DECISIONES.md        Contratos y decisiones de modelado (DEC-001 a DEC-006)
 ```
 
 Los CSV y las entregas generadas están excluidos de Git. Los archivos `data/raw/*.csv.dvc` sí se versionan.
@@ -125,3 +125,22 @@ forecasts = forecast_week(inbox, start, cutoff, model, calibration, result.costs
 ```
 
 `config/forecast_costs.json` fija costos unitarios de subestimación y sobreestimación y exige una mejora relativa mínima del 5 %. El baseline es el vigente: Ridge solo lo reemplaza si en selección reduce el costo medio más que ese umbral y no aumenta MAE. La prueba se reserva para informar MAE, RMSE, costo medio, pérdida pinball y cobertura del intervalo 10–90 %. Los modelos, resultados y pronósticos se mantienen en memoria; no se escriben datasets ni artefactos. Los cuantiles son globales y pueden ser poco fiables con escasa calibración. Esta métrica es un costo diario de error de demanda, todavía no el costo de un pedido semanal con inventario. Falta integrar inventario, pedidos en tránsito y plazos de entrega para generar pedidos finales. Tampoco hay un flujo de Airflow operativo. El contrato completo se documenta en [DEC-003, DEC-004 y DEC-005](DECISIONES.md).
+
+## Pedidos semanales sugeridos
+
+`inventory.ordering.suggest_weekly_orders` devuelve una cantidad bruta de cobertura por tienda y familia para los siete días siguientes. Reutiliza `forecast_week`, el modelo y la calibración diaria existentes. La calibración semanal suma las siete ventas observadas y resta la suma de los siete pronósticos medianos **para cada semana histórica completa**; usa solo etiquetas entregadas antes del corte de decisión. Los cuantiles 10, 50 y 90 del total semanal se obtienen de esos errores semanales, no sumando cuantiles diarios. Las semanas con alguna venta ausente se excluyen y, si no queda ninguna semana completa, la función falla explícitamente.
+
+El cuantil de decisión es `underforecast_per_unit / (underforecast_per_unit + overforecast_per_unit)`, actualmente 5/6; `suggested_units` es su valor semanal redondeado hacia arriba y limitado a cero. `min_relative_improvement` solo interviene en la selección del modelo. Para cambiar la decisión con el mismo modelo y los mismos datos, pase otra versión de `config/forecast_costs.json` a `costs_path`; el resultado incluye los costos utilizados. Para reproducir una decisión histórica, conserve esa versión de configuración y use el mismo corte y las mismas entregas inmutables.
+
+```python
+from inventory.ordering import suggest_weekly_orders
+
+orders = suggest_weekly_orders(
+    inbox, start, cutoff, result,
+    calibration_first_start=date(2017, 7, 9),
+    calibration_last_start=date(2017, 7, 30),
+    costs_path=Path("config/forecast_costs.json"),
+)
+```
+
+El ejemplo usa el `result`, `start` y `cutoff` definidos arriba. `evaluate_models` incorpora en `result.selected_forecast` el modelo elegido, su calibración diaria, el corte en que ya estaban disponibles las etiquetas para seleccionar el modelo y el corte de disponibilidad de la calibración diaria. También registra una huella del estado del modelo. `suggest_weekly_orders` exige ese resultado, comprueba ambas fechas contra **cada corte histórico** y el corte objetivo, y rechaza un modelo Ridge cuyo estado haya cambiado. Las fechas representan disponibilidad de la información en la simulación de entregas, no una fecha real de publicación del artefacto. Un `EvaluationResult` construido manualmente con metadatos falsos no ofrece esta garantía; use el devuelto por `evaluate_models`. Cada recomendación conserva ambas fechas y la huella para auditoría. La función reconstruye las etiquetas de calibración semanal al corte solicitado. Los costos de faltante y merma son una aproximación por unidad de demanda semanal insuficiente o excedente. Sin existencias, pedidos en tránsito, plazos de entrega ni vida útil, `suggested_units` **no es un pedido neto ejecutable**: supone disponibilidad de toda la cantidad al inicio de la semana y que el excedente se valora al final. La calibración semanal global puede ser inestable con pocas semanas o no representar bien una serie particular. Véase [DEC-006](DECISIONES.md).
