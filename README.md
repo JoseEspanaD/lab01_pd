@@ -1,11 +1,11 @@
 # Motor de Reposición de Inventario — Laboratorio 1
 
-Proyecto de Product Development con datos públicos de Corporación Favorita. El objetivo es construir un flujo reproducible que, a partir de ventas y otras fuentes históricas, permita generar pronósticos y recomendaciones de reposición. La rama `feat/data-ingestion` implementa la primera parte: entregas simuladas y lectura de ventas según un corte temporal.
+Proyecto de Product Development con datos públicos de Corporación Favorita. El objetivo es construir un flujo reproducible que, a partir de ventas y otras fuentes históricas, permita generar pronósticos y recomendaciones de reposición. La ingesta actual simula entregas y reconstruye cortes históricos para las cinco fuentes.
 
 ## Estructura mínima
 
 ```text
-src/inventory/       Paquete Python: simulación, selección e ingesta de ventas
+src/inventory/       Paquete Python: simulación, selección e ingesta de cinco fuentes
 tests/               Pruebas pytest con datos sintéticos
 data/raw/            Cinco CSV originales, asociados a archivos .dvc
 data/inbox/          Entregas simuladas e inmutables; entrada de solo lectura para la ingesta
@@ -47,15 +47,25 @@ La configuración versionada `.dvc/config` no define un remoto. Un remoto local 
 
 ## Entregas e ingesta actuales
 
-Para consultar la CLI y simular **una sola fecha de ventas** desde la raíz:
+Para consultar la CLI disponible y simular **una sola fecha de ventas** desde la raíz:
 
 ```bash
 python -m inventory.train_delivery --help
 python -m inventory.train_delivery 2017-08-15
 ```
 
-La segunda orden lee `data/raw/train.csv` y publica, si hay registros para esa fecha, una entrega en `data/inbox/`. No sobrescribe una entrega existente: repetirla con los mismos datos devuelve la misma ruta. La disponibilidad simulada para ventas es D+1 a las 06:00 UTC. La CLI es un productor de la bandeja; la ingesta trata `data/inbox/` como entrada de solo lectura.
+La segunda orden lee `data/raw/train.csv` y publica, si hay registros para esa fecha, una entrega en `data/inbox/`. Es la única CLI de entregas disponible; las otras fuentes se manejan mediante funciones Python.
 
-También están implementadas las funciones Python `select_deliveries(inbox_dir, cutoff_at)` e `ingest_sales(inbox_dir, cutoff_at)`. La primera selecciona rutas por disponibilidad, fecha y revisión; la segunda lee y valida únicamente las entregas seleccionadas de `train`. `cutoff_at` debe ser un `datetime` con zona UTC. Las correcciones se conservan como lotes completos e inmutables según [DEC-001](DECISIONES.md); todavía no hay una CLI que las publique.
+| Fuente | Simulador | Ingesta | Disponibilidad simulada |
+| --- | --- | --- | --- |
+| `train` | `inventory.train_delivery.simulate_train_delivery` | `inventory.sales_ingestion.ingest_sales` | D+1 a las 06:00 UTC |
+| `transactions` | `inventory.transactions.simulate_transactions_delivery` | `inventory.transactions.ingest_transactions` | D+1 a las 06:00 UTC |
+| `oil` | `inventory.oil.simulate_oil_delivery` | `inventory.oil.ingest_oil` | D+1 a las 06:00 UTC |
+| `holidays_events` | `inventory.holidays_events.simulate_holidays_delivery` | `inventory.holidays_events.ingest_holidays` | D+1 a las 06:00 UTC |
+| `stores` | `inventory.stores.simulate_stores_delivery` | `inventory.stores.ingest_stores` | T0 = 2013-01-01 00:00 UTC |
 
-Quedan pendientes los productores y la ingesta de `transactions`, `oil`, `holidays_events` y `stores`, la escritura en `data/processed/`, los pronósticos y las recomendaciones. Tampoco hay un flujo de Airflow operativo para esta ingesta.
+Los simuladores de fuentes fechadas reciben una fecha de observación y generan solo su lote; `stores` publica el catálogo inicial completo. No sobrescriben entregas existentes y repetir una operación con los mismos datos devuelve la misma ruta. `select_deliveries(inbox_dir, cutoff_at)` elige entregas por disponibilidad y revisión; cada función de ingesta lee solo las seleccionadas de su fuente, valida sus registros y devuelve resultados ordenados sin escribir en `data/inbox/` ni en `data/processed/`. `cutoff_at` debe ser un `datetime` UTC. Los precios vacíos de `oil` se conservan como faltantes y los eventos de una fecha mantienen su alcance geográfico. Las correcciones de `transactions`, `oil`, `holidays_events` y `stores` se publican como revisiones completas con `available_at` explícito; el simulador de `train` solo publica la revisión inicial. El contrato de rutas y cortes está en [DEC-001](DECISIONES.md).
+
+Las pruebas pytest usan CSV y bandejas temporales. La prueba `tests/test_all_sources_integration.py` verifica las cinco fuentes en un mismo corte, la disponibilidad, una corrección y la estabilidad de un corte anterior; `tests/test_sales_flow_integration.py` cubre además una corrección externa de ventas.
+
+La disponibilidad D+1 y T0 son supuestos, no fechas reales de publicación. El catálogo de `stores` se trata como estable desde T0 y los feriados futuros no se adelantan; consulta las limitaciones de [DEC-001](DECISIONES.md) antes de usar estos datos en predicciones. Aún no hay generación de `data/processed/`, preparación de features, entrenamiento, pronósticos, recomendaciones ni un flujo de Airflow operativo.
