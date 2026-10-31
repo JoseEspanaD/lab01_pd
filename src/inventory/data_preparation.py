@@ -50,6 +50,19 @@ class TrainingExample:
     label_sales: Decimal
 
 
+@dataclass(frozen=True)
+class ForecastExample:
+    """One day in a seven-day forecast from a shared weekly cutoff."""
+
+    forecast_start_date: date
+    target_date: date
+    store_nbr: int
+    family: str
+    prediction_cutoff_at: datetime
+    features: Features
+    label_sales: Decimal | None = None
+
+
 def _prediction_cutoff(target_date: date) -> datetime:
     try:
         return datetime.combine(target_date - timedelta(days=1), time(6), tzinfo=timezone.utc)
@@ -184,6 +197,57 @@ class _History:
             self.stores = {record.store_nbr: record for record in new}
 
 
+def _features_for(history: _History, target_date: date, window_start: date,
+                  pair: tuple[int, str]) -> Features:
+    """Use only the history already advanced to the prediction cutoff."""
+    dates = history.sales_dates[pair]
+    last_sale = history.sales[pair][dates[-1]]
+    first_observed = window_start - timedelta(days=8)
+    week_sales = [
+        history.sales[pair][observed].sales
+        for observed in dates[bisect_left(dates, first_observed):]
+        if observed <= window_start - timedelta(days=2)
+    ]
+    store = history.stores.get(pair[0])
+    transaction_dates = history.transaction_dates.get(pair[0], [])
+    last_transaction = (
+        history.transactions[pair[0]][transaction_dates[-1]] if transaction_dates else None
+    )
+    last_oil = history.oil[history.oil_dates[-1]] if history.oil_dates else None
+    known_events = sum(
+        1 for offset in range(2, 9)
+        for event in history.events.get(window_start - timedelta(days=offset), [])
+        if _applies(event, store)
+    )
+    return Features(
+        day_of_week=target_date.weekday(),
+        month=target_date.month,
+        city=store.city if store else None,
+        state=store.state if store else None,
+        store_type=store.type if store else None,
+        cluster=store.cluster if store else None,
+        last_sales=last_sale.sales,
+        sales_age_days=(target_date - last_sale.date).days,
+        mean_sales_7d=sum(week_sales, Decimal(0)) / len(week_sales) if week_sales else None,
+        last_onpromotion=last_sale.onpromotion,
+        last_transactions=last_transaction.transactions if last_transaction else None,
+        transactions_age_days=(target_date - last_transaction.date).days if last_transaction else None,
+        last_oil_price=last_oil.dcoilwtico if last_oil else None,
+        oil_age_days=(target_date - last_oil.date).days if last_oil else None,
+        known_events_7d=known_events,
+    )
+
+
+def _validate_dates_and_cutoff(start_date: date, end_date: date, cutoff_at: datetime) -> None:
+    if (not isinstance(start_date, date) or isinstance(start_date, datetime)
+            or not isinstance(end_date, date) or isinstance(end_date, datetime)):
+        raise ValueError("start_date y end_date deben ser fechas sin hora")
+    if end_date < start_date:
+        raise ValueError("end_date debe ser igual o posterior a start_date")
+    if not isinstance(cutoff_at, datetime) or cutoff_at.tzinfo is None or cutoff_at.utcoffset() != timedelta(0):
+        raise ValueError("cutoff_at debe ser un datetime UTC")
+
+
 def prepare_training_data(
     inbox_dir: Path,
     start_date: date,
@@ -195,13 +259,7 @@ def prepare_training_data(
     The training cutoff limits labels. Predictors use deliveries available at
     06:00 UTC on the day before each target, so later revisions cannot rewrite them.
     """
-    if (not isinstance(start_date, date) or isinstance(start_date, datetime)
-            or not isinstance(end_date, date) or isinstance(end_date, datetime)):
-        raise ValueError("start_date y end_date deben ser fechas sin hora")
-    if end_date < start_date:
-        raise ValueError("end_date debe ser igual o posterior a start_date")
-    if not isinstance(cutoff_at, datetime) or cutoff_at.tzinfo is None or cutoff_at.utcoffset() != timedelta(0):
-        raise ValueError("cutoff_at debe ser un datetime UTC")
+    _validate_dates_and_cutoff(start_date, end_date, cutoff_at)
 
     inbox_dir = Path(inbox_dir)
     labels_by_date: dict[date, list] = defaultdict(list)
@@ -216,47 +274,56 @@ def prepare_training_data(
         if prediction_cutoff_at > cutoff_at:
             continue
         history.advance(prediction_cutoff_at)
-        week_start = target_date - timedelta(days=8)
-
         for label in labels_by_date[target_date]:
             pair = (label.store_nbr, label.family)
             dates = history.sales_dates.get(pair)
             if not dates:
                 continue  # No historical evidence that this store-family series existed.
-            last_sale = history.sales[pair][dates[-1]]
-            week_sales = [
-                history.sales[pair][observed].sales
-                for observed in dates[bisect_left(dates, week_start):]
-            ]
-            store = history.stores.get(label.store_nbr)
-            transaction_dates = history.transaction_dates.get(label.store_nbr, [])
-            last_transaction = (
-                history.transactions[label.store_nbr][transaction_dates[-1]] if transaction_dates else None
-            )
-            last_oil = history.oil[history.oil_dates[-1]] if history.oil_dates else None
-            known_events = sum(
-                1 for offset in range(2, 9)
-                for event in history.events.get(target_date - timedelta(days=offset), [])
-                if _applies(event, store)
-            )
-            features = Features(
-                day_of_week=target_date.weekday(),
-                month=target_date.month,
-                city=store.city if store else None,
-                state=store.state if store else None,
-                store_type=store.type if store else None,
-                cluster=store.cluster if store else None,
-                last_sales=last_sale.sales,
-                sales_age_days=(target_date - last_sale.date).days,
-                mean_sales_7d=sum(week_sales, Decimal(0)) / len(week_sales) if week_sales else None,
-                last_onpromotion=last_sale.onpromotion,
-                last_transactions=last_transaction.transactions if last_transaction else None,
-                transactions_age_days=(target_date - last_transaction.date).days if last_transaction else None,
-                last_oil_price=last_oil.dcoilwtico if last_oil else None,
-                oil_age_days=(target_date - last_oil.date).days if last_oil else None,
-                known_events_7d=known_events,
-            )
+            features = _features_for(history, target_date, target_date, pair)
             examples.append(TrainingExample(
                 target_date, label.store_nbr, label.family, prediction_cutoff_at, features, label.sales
             ))
     return examples
+
+
+def prepare_forecast_examples(
+    inbox_dir: Path,
+    first_start_date: date,
+    last_start_date: date,
+    cutoff_at: datetime,
+    *,
+    require_labels: bool = False,
+) -> list[ForecastExample]:
+    """Build seven daily rows per weekly origin from its one historical cutoff.
+
+    Origins are seven days apart. When labels are required, a store-family week
+    is included only if all seven observed sales are visible at cutoff_at.
+    """
+    _validate_dates_and_cutoff(first_start_date, last_start_date, cutoff_at)
+    if (last_start_date - first_start_date).days % 7:
+        raise ValueError("Los inicios semanales deben estar separados por semanas completas")
+    inbox_dir = Path(inbox_dir)
+    labels: dict[tuple[date, int, str], Decimal] = {}
+    if require_labels:
+        labels = {(sale.date, sale.store_nbr, sale.family): sale.sales
+                  for sale in ingest_sales(inbox_dir, cutoff_at)}
+
+    history = _History(inbox_dir)
+    rows: list[ForecastExample] = []
+    for week in range((last_start_date - first_start_date).days // 7 + 1):
+        start = first_start_date + timedelta(days=7 * week)
+        prediction_cutoff_at = _prediction_cutoff(start)
+        if prediction_cutoff_at > cutoff_at:
+            raise ValueError("El corte semanal de predicción no puede superar cutoff_at")
+        history.advance(prediction_cutoff_at)
+        for store_nbr, family in sorted(pair for pair, dates in history.sales_dates.items() if dates):
+            targets = [start + timedelta(days=offset) for offset in range(7)]
+            if require_labels and any((day, store_nbr, family) not in labels for day in targets):
+                continue
+            for target in targets:
+                rows.append(ForecastExample(
+                    start, target, store_nbr, family, prediction_cutoff_at,
+                    _features_for(history, target, start, (store_nbr, family)),
+                    labels[(target, store_nbr, family)] if require_labels else None,
+                ))
+    return rows
