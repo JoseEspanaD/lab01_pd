@@ -1,0 +1,5 @@
+{
+  "underforecast_per_unit": 5.0,
+  "overforecast_per_unit": 1.0,
+  "min_relative_improvement": 0.05
+}
