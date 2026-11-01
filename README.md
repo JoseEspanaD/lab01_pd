@@ -5,17 +5,19 @@ Proyecto de Product Development con datos públicos de Corporación Favorita. El
 ## Estructura mínima
 
 ```text
-src/inventory/       Paquete Python: ingesta, preparación, pronósticos, pedidos y seguimiento
+src/inventory/       Paquete Python: ingesta, preparación, pronósticos, pedidos y reproducción
 tests/               Pruebas pytest con datos sintéticos
 data/raw/            Cinco CSV originales, asociados a archivos .dvc
 data/inbox/          Entregas simuladas e inmutables; entrada de solo lectura para la ingesta
 data/published/      Publicaciones y reportes inmutables; artefactos excluidos de Git
 data/processed/      Salidas derivadas previstas
+data/reproductions/ Instantánea y particiones de la demostración histórica, mediante DVC
+models/              Modelo y calibración serializados, mediante DVC
 config/              Costos y umbral de reemplazo versionados
-DECISIONES.md        Contratos y decisiones de modelado (DEC-001 a DEC-007)
+DECISIONES.md        Contratos y decisiones técnicas
 ```
 
-Los CSV y las entregas generadas están excluidos de Git. Los archivos `data/raw/*.csv.dvc` sí se versionan.
+Los CSV y los artefactos generados están excluidos de Git. Los punteros `.dvc` sí se versionan; DagsHub almacena los objetos.
 
 ## Requisitos e instalación
 
@@ -57,7 +59,7 @@ data/raw/holidays_events.csv
 data/raw/stores.csv
 ```
 
-Los otros archivos de la descarga, como `test.csv` y `sample_submission.csv`, no forman parte de los cinco datasets versionados aquí. Cada archivo `.csv.dvc` registra la ruta y la huella del CSV esperado. Si se obtienen versiones o contenidos distintos, no coincidirán con esos metadatos. Los datos procesados, modelos y pronósticos publicados todavía requieren versionado posterior con DVC.
+Los otros archivos de la descarga, como `test.csv` y `sample_submission.csv`, no forman parte de los cinco datasets versionados aquí. Cada archivo `.csv.dvc` registra la ruta y la huella del CSV esperado. Si se obtienen versiones o contenidos distintos, no coincidirán con esos metadatos. La demostración histórica descrita abajo añade punteros DVC para la instantánea, las particiones, el modelo, la publicación y el manifiesto; otros artefactos operativos no quedan versionados automáticamente.
 
 ## Entregas e ingesta actuales
 
@@ -137,7 +139,7 @@ model, calibration = (
 forecasts = forecast_week(inbox, start, cutoff, model, calibration, result.costs)
 ```
 
-`config/forecast_costs.json` fija costos unitarios de subestimación y sobreestimación y exige una mejora relativa mínima del 5 %. El baseline es el vigente: Ridge solo lo reemplaza si en selección reduce el costo medio más que ese umbral y no aumenta MAE. La prueba se reserva para informar MAE, RMSE, costo medio, pérdida pinball y cobertura del intervalo 10–90 %. `evaluate_models` y `forecast_week` devuelven resultados en memoria; la publicación se realiza mediante el módulo descrito más abajo. Los cuantiles son globales y pueden ser poco fiables con escasa calibración. Esta métrica es un costo diario de error de demanda, todavía no el costo de un pedido semanal con inventario. Falta integrar inventario, pedidos en tránsito y plazos de entrega para generar pedidos finales. Tampoco hay un flujo de Airflow operativo. El contrato completo se documenta en [DEC-003, DEC-004 y DEC-005](DECISIONES.md).
+`config/forecast_costs.json` fija costos unitarios de subestimación y sobreestimación y exige una mejora relativa mínima del 5 %. El baseline es el vigente: Ridge solo lo reemplaza si en selección reduce el costo medio más que ese umbral y no aumenta MAE. La prueba se reserva para informar MAE, RMSE, costo medio, pérdida pinball y cobertura del intervalo 10–90 %. `evaluate_models` conserva en `result.partitions` las filas exactas de entrenamiento, calibración, selección y prueba, que la reproducción histórica persiste; `forecast_week` devuelve pronósticos en memoria. Los cuantiles son globales y pueden ser poco fiables con escasa calibración. Esta métrica es un costo diario de error de demanda, todavía no el costo de un pedido semanal con inventario. Falta integrar inventario, pedidos en tránsito y plazos de entrega para generar pedidos finales. Tampoco hay un flujo de Airflow operativo. El contrato completo se documenta en [DEC-003, DEC-004 y DEC-005](DECISIONES.md).
 
 ## Pedidos semanales sugeridos
 
@@ -186,4 +188,22 @@ report = evaluate_publication(
 print(report.metrics)
 ```
 
-La fecha de disponibilidad de modelo y calibración procede de los cortes lógicos de `evaluate_models`, no de un registro externo de artefactos; su objeto en memoria puede falsificarse y el modelo y la calibración todavía no se conservan como artefactos independientes. El manifiesto de entregas identifica las entradas visibles para **la predicción al corte**, pero `EvaluationResult` no conserva un manifiesto completo de las versiones usadas al entrenar y seleccionar el modelo. Para reproducir una evaluación se necesitan la publicación y las entregas inmutables originales. Las huellas detectan cambios accidentales de contenido, pero la retención y recuperación entre máquinas requieren el futuro versionado de artefactos. Véase [DEC-007](DECISIONES.md).
+La fecha de disponibilidad de modelo y calibración procede de los cortes lógicos de `evaluate_models`, no de un registro externo de artefactos; un objeto en memoria fabricado externamente todavía podría falsificar esos campos. La demostración siguiente conserva las entradas, particiones, modelo y calibración realmente usados en una ejecución concreta. El manifiesto de la publicación general por sí solo identifica las entradas visibles para la predicción, no todas las versiones históricas del entrenamiento. Véase [DEC-007](DECISIONES.md).
+
+## Reproducción histórica con DVC
+
+El escenario `historical-20170801-store1-grocery-i` reconstruye **una simulación histórica**, no una publicación real de 2017. Pronostica los siete días del 1 al 7 de agosto de 2017 para tienda 1 y familia `GROCERY I`, con corte **2017-07-31 06:00 UTC**. Usa únicamente esa serie de `train.csv`, las fuentes auxiliares entre el 27 de mayo y el 30 de julio, y el catálogo de tiendas. Las entregas de fuentes fechadas se simulan en **D+1 a las 06:00 UTC**; el catálogo, en **T0 = 2013-01-01 00:00 UTC**. Estas son disponibilidades supuestas: Kaggle no proporciona las fechas reales de entrega ni permite acreditar históricamente la vigencia de todos los atributos de tienda.
+
+La evaluación usa cuatro semanas de origen, con una semana de embargo entre ellas: entrenamiento 2017-06-04, calibración 2017-06-18, selección 2017-07-02 y prueba 2017-07-16. Las etiquetas de prueba se leen al corte de reporte **2017-07-24 06:00 UTC**; la selección del modelo y su calibración se fijan antes del corte del pronóstico. `data/reproductions/<id>/inbox` contiene los lotes simulados e inmutables; `processed.json` contiene las filas exactas de las cuatro particiones; `models/<id>.json` contiene el estado numérico del modelo y los residuos diarios en JSON, sin pickle; `data/published/forecasts/<id>.json` es la publicación inmutable con `kind=historical_simulation` y `published_at=null`. `manifest.json` une hashes de esos contenidos, punteros DVC, cinco CSV originales, configuración, parámetros, corte y revisión Git del código. El manifiesto no se referencia a sí mismo.
+
+Desde un **clon limpio de la revisión que contenga los punteros del escenario**, instala el proyecto y DVC como se indica arriba. Configura `auth=basic`, tu usuario y `ask_password=true` con los comandos de «Datos originales»; DVC solicitará tu **propio token** de DagsHub en la terminal. Nunca lo pegues en el chat, en un comando ni en un archivo versionado. Después ejecuta:
+
+```bash
+dvc pull
+dvc status
+python -m inventory.historical_reproduction verify
+```
+
+`dvc pull` recupera los cinco CSV y los cinco artefactos de la demostración desde DagsHub. `verify` comprueba la revisión Git de código como antecesora de la revisión actual, los contenidos comprometidos en esa revisión, las huellas de punteros y objetos, los lotes visibles, las cuatro particiones reconstruidas con sus cortes, el modelo y calibración seleccionados y las siete predicciones regeneradas desde el estado archivado. El resultado esperado del escenario es `forecast_rows: 7`, `cutoff_at: 2017-07-31T06:00:00+00:00` y `selected_model: baseline`. En los siete días archivados, `q50` es **2368.285714** al redondear a seis decimales. No reescribe la publicación. Si un objeto no se recupera, consulta el acceso a DagsHub de tu cuenta; la lectura anónima con `dvc pull` no se ha verificado y devolvió HTTP 401 en la prueba previa.
+
+Para construir localmente la demostración desde los cinco CSV originales de Kaggle que coincidan con sus `.dvc`, ejecuta `python -m inventory.historical_reproduction build`. El comando procesa `train.csv` en una sola pasada y escribe la instantánea en `data/reproductions/`, fuera de la bandeja operativa `data/inbox/`; repetirlo con las mismas entradas es idempotente, mientras una diferencia se rechaza. Para registrar una ejecución nueva con DVC, aplica `dvc add` a `inbox`, `processed.json`, el JSON del modelo y el JSON de la publicación, en ese orden. Cuando exista el commit de código, fija su SHA mediante `python -m inventory.historical_reproduction manifest --source-git-commit SHA_COMMIT_CODIGO` y ejecuta `dvc add data/reproductions/historical-20170801-store1-grocery-i/manifest.json`. Un borrador local sin SHA se puede finalizar una sola vez si sus demás referencias no cambiaron; un manifiesto ya finalizado no se sustituye. El commit de punteros DVC puede seguir al de código dentro del mismo PR. Usa `python -m inventory.historical_reproduction verify` antes de publicar. Ningún comando de reproducción requiere Airflow.
