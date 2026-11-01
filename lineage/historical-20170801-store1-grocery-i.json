@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "run_id": "historical-20170801-store1-grocery-i",
+  "manifest_sha256": "80a071bd8d7558f4f5cb9d781b71a03b9e571804da2e680006c8da8f1f015640",
+  "source_git_commit": "10d0db261924ea168eb2829a8a516b7a8a1be5a1",
+  "integrated_git_commit": "3707bd575870f01475ebfe202fd52897c9518395"
+}
