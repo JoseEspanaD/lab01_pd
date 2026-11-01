@@ -63,6 +63,7 @@ def test_refresh_uses_evaluation_cut_and_excludes_forecast_inputs() -> None:
 
 
 def test_airflow_graph_orders_stages_and_retries(monkeypatch) -> None:
+    monkeypatch.setenv("INVENTORY_SIMULATION_ENABLED", "false")
     edges = []
     settings = {}
 
@@ -103,6 +104,57 @@ def test_airflow_graph_orders_stages_and_retries(monkeypatch) -> None:
     assert settings["schedule"] is None
     assert settings["max_active_runs"] == 1
     assert settings["default_args"]["retries"] == 1
+
+
+def test_only_integrated_dag_has_an_opt_in_schedule(monkeypatch) -> None:
+    monkeypatch.setenv("INVENTORY_SIMULATION_ENABLED", "true")
+    monkeypatch.setenv("INVENTORY_SIMULATION_WALL_START_AT", "2025-01-01T12:00:00Z")
+    monkeypatch.setenv("INVENTORY_SIMULATION_FIRST_CUTOFF_AT", "2017-07-24T06:00:00Z")
+    monkeypatch.setenv("INVENTORY_SIMULATION_TICK_MINUTES", "5")
+    monkeypatch.setenv("INVENTORY_SIMULATION_TICKS", "10")
+    settings = {}
+
+    class Node:
+        def __rshift__(self, other):
+            return other
+
+    def fake_dag(**kwargs):
+        settings.update(kwargs)
+        return lambda function: function
+
+    def fake_task(function):
+        return lambda *args: Node()
+
+    class FakeTimetable:
+        def __init__(self, cron, timezone):
+            self.cron, self.timezone = cron, timezone
+
+    airflow = ModuleType("airflow")
+    airflow.__path__ = []
+    sdk = ModuleType("airflow.sdk")
+    timetables = ModuleType("airflow.timetables")
+    timetables.__path__ = []
+    trigger = ModuleType("airflow.timetables.trigger")
+    sdk.dag, sdk.task = fake_dag, fake_task
+    sdk.get_current_context = lambda: None
+    trigger.CronTriggerTimetable = FakeTimetable
+    monkeypatch.setitem(sys.modules, "airflow", airflow)
+    monkeypatch.setitem(sys.modules, "airflow.sdk", sdk)
+    monkeypatch.setitem(sys.modules, "airflow.timetables", timetables)
+    monkeypatch.setitem(sys.modules, "airflow.timetables.trigger", trigger)
+    dag_path = Path(__file__).parents[1] / "airflow/dags/inventory_operational_flow.py"
+    runpy.run_path(str(dag_path))
+    assert settings["schedule"].cron == "*/5 * * * *"
+    assert settings["schedule"].timezone == "UTC"
+    assert settings["start_date"] == datetime(2025, 1, 1, 12, tzinfo=timezone.utc)
+    assert settings["end_date"] == datetime(2025, 1, 1, 12, 45, tzinfo=timezone.utc)
+    assert settings["catchup"] is True
+    assert settings["is_paused_upon_creation"] is True
+    for name in ("airflow_smoke", "ingest_deliveries", "prepare_training_data",
+                 "weekly_forecast_orders", "monitor_published_forecasts"):
+        path = dag_path.with_name(f"{name}.py")
+        runpy.run_path(str(path))
+        assert settings["schedule"] is None
 
 
 def _at(day: date) -> datetime:

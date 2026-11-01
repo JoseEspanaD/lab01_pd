@@ -24,6 +24,11 @@ x-airflow-common: &airflow-common
     INVENTORY_PROCESSED_DIR: /opt/airflow/lab/data/processed
     INVENTORY_PUBLISHED_DIR: /opt/airflow/lab/data/published
     INVENTORY_COSTS_PATH: /opt/airflow/lab/config/forecast_costs.json
+    INVENTORY_SIMULATION_ENABLED: ${INVENTORY_SIMULATION_ENABLED:-false}
+    INVENTORY_SIMULATION_WALL_START_AT: ${INVENTORY_SIMULATION_WALL_START_AT:-}
+    INVENTORY_SIMULATION_FIRST_CUTOFF_AT: ${INVENTORY_SIMULATION_FIRST_CUTOFF_AT:-}
+    INVENTORY_SIMULATION_TICK_MINUTES: ${INVENTORY_SIMULATION_TICK_MINUTES:-}
+    INVENTORY_SIMULATION_TICKS: ${INVENTORY_SIMULATION_TICKS:-}
   volumes: &airflow-volumes
     - ./airflow/dags:/opt/airflow/dags:ro
     - ./src:/opt/airflow/src:ro

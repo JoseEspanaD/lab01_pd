@@ -41,7 +41,7 @@ Si se utiliza una versión posterior a 3.12, sustituye `python3.12` por el ejecu
 
 ## Airflow 3 local con Docker Compose
 
-La infraestructura ejecuta **Airflow 3.3.2 con Python 3.12**, `LocalExecutor` y SQLite persistido. Incluye `airflow_smoke`, los cuatro DAGs manuales de etapa (`ingest_deliveries`, `prepare_training_data`, `weekly_forecast_orders`, `monitor_published_forecasts`) y el DAG manual encadenado `inventory_operational_flow`. Se requieren Docker Engine y Docker Compose; Airflow se ejecuta en contenedores y no se instala en el virtualenv del proyecto. En Ubuntu WSL2, desde la raíz del repositorio:
+La infraestructura ejecuta **Airflow 3.3.2 con Python 3.12**, `LocalExecutor` y SQLite persistido. Incluye `airflow_smoke`, los cuatro DAGs manuales de etapa (`ingest_deliveries`, `prepare_training_data`, `weekly_forecast_orders`, `monitor_published_forecasts`) y `inventory_operational_flow`, manual por defecto y programable solo para una simulación histórica acotada. Se requieren Docker Engine y Docker Compose; Airflow se ejecuta en contenedores y no se instala en el virtualenv del proyecto. En Ubuntu WSL2, desde la raíz del repositorio:
 
 ```bash
 python3 scripts/init_airflow_env.py
@@ -161,7 +161,7 @@ Las revisiones con `available_at` posterior a un corte no alteran su reporte; un
 
 ### Flujo operativo encadenado
 
-`inventory_operational_flow` une las cinco etapas en un solo DAG manual de Airflow 3: `validate → produce → ingest → prepare → publish → monitor`. Cada etapa depende del éxito de la anterior; las tareas tienen un reintento con un minuto de espera y el DAG admite un solo run activo. `dag_run.conf` debe indicar `mode`, `evaluation_at` UTC y, en modo `forecast`, todos los parámetros de `weekly_forecast_orders`. `cutoff_at` de pronóstico debe ser D−1 06:00 UTC respecto a `forecast_start_date`; se transmite sin cambios al productor, la ingesta, la preparación y la publicación. `train_start` y `forecast_start_date−1` delimitan la preparación. `evaluation_at` es el corte del monitoreo y puede ser posterior al de decisión, pero nunca anterior ni futuro. Ningún dato posterior a `cutoff_at` entra en el pronóstico.
+`inventory_operational_flow` une las cinco etapas en un solo DAG de Airflow 3: `validate → produce → ingest → prepare → publish → monitor`. Cada etapa depende del éxito de la anterior; las tareas tienen un reintento con un minuto de espera y el DAG admite un solo run activo. Los **runs manuales** deben indicar en `dag_run.conf` `mode`, `evaluation_at` UTC y, en modo `forecast`, todos los parámetros de `weekly_forecast_orders`. Los runs programados derivan esos parámetros del reloj histórico optativo descrito abajo. `cutoff_at` de pronóstico debe ser D−1 06:00 UTC respecto a `forecast_start_date`; se transmite sin cambios al productor, la ingesta, la preparación y la publicación. `train_start` y `forecast_start_date−1` delimitan la preparación. `evaluation_at` es el corte del monitoreo y puede ser posterior al de decisión, pero nunca anterior ni futuro. Ningún dato posterior a `cutoff_at` entra en el pronóstico.
 
 El objeto opcional `production` contiene `observation_date` y, si corresponde, `source`, `revision`, `available_at` y `correction_path`. Al omitirlo, el DAG usa entregas históricas ya conservadas en la bandeja, útil para backfill. Al incluirlo, publica solamente esa fecha desde los cinco CSV originales (`source=all` por defecto) o una fuente; repetir una ejecución no duplica ni sustituye entregas. `correction_path` debe señalar un CSV completo montado en `/opt/airflow/lab/data/producer-input/`. La tarea `validate` comprueba los cortes antes de producir. Las operaciones vuelven a verificar sus insumos y rechazan conflictos retroactivos.
 
@@ -290,6 +290,60 @@ docker compose -p lab1jul25 down
 
 La ejecución comprobada está descrita en [docs/reproduccion_clon_limpio.md](docs/reproduccion_clon_limpio.md). El productor procesa una fecha por llamada; no se ha probado una corrección de contenido con estos cinco CSV. Las disponibilidades D+1/T0 son supuestos de simulación, no registros de entrega reales de Kaggle.
 
+#### Reloj periódico para una simulación histórica
+
+La programación de `inventory_operational_flow` está **desactivada por defecto**. Para observarla, usa un clon y un nombre Compose propios: ejecuta los pasos de instalación, inicio de Compose y producción de las 58 fechas de la receta anterior, sustituyendo `lab1jul25` por `lab1periodic01`. Detente después del bucle productor: no ejecutes los triggers manuales de esa receta. Los cinco CSV originales son las únicas entradas; no se requiere la instantánea DVC. Antes de cambiar el calendario, pausa el DAG ya registrado:
+
+```bash
+PROJECT=lab1periodic01
+docker compose -p "$PROJECT" exec airflow-scheduler airflow dags pause inventory_operational_flow
+WALL_START_AT=$(python - <<'PY'
+from datetime import datetime, timedelta, timezone
+
+instant = datetime.now(timezone.utc) + timedelta(minutes=10)
+instant = instant.replace(second=0, microsecond=0)
+instant += timedelta(minutes=(-instant.minute) % 5)
+print(instant.strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+)
+cat >> .env <<EOF
+INVENTORY_SIMULATION_ENABLED=true
+INVENTORY_SIMULATION_WALL_START_AT=$WALL_START_AT
+INVENTORY_SIMULATION_FIRST_CUTOFF_AT=2017-07-24T06:00:00Z
+INVENTORY_SIMULATION_TICK_MINUTES=5
+INVENTORY_SIMULATION_TICKS=10
+EOF
+docker compose -p "$PROJECT" config --quiet
+docker compose -p "$PROJECT" up -d --force-recreate airflow-api-server airflow-scheduler airflow-dag-processor
+docker compose -p "$PROJECT" exec airflow-dag-processor airflow dags list-import-errors
+docker compose -p "$PROJECT" exec airflow-scheduler airflow dags unpause inventory_operational_flow
+```
+
+El primer tick de reloj `WALL_START_AT` representa **2017-07-24 06:00 UTC**; cada tick real de cinco minutos avanza **un día histórico**, sin usar la fecha del sistema como venta. El tick 0 produce de forma idempotente el 23 de julio y pronostica el 25–31 de julio; los ticks 1 y 2 solo actualizan entregas, ingesta y monitoreo con cortes del 25 y 26 de julio. El tick 7 publica la semana del 1 de agosto. Las particiones de evaluación se desplazan siete días entre publicaciones. Los diez ticks terminan en el corte histórico **2017-08-02 06:00 UTC**; Airflow no programa más runs de este calendario. `evaluation_at` coincide con el corte de cada tick: ningún monitoreo ve ventas de una fecha posterior. Todas las publicaciones programadas tienen `kind=historical_simulation`.
+
+Observa al menos tres runs creados por el scheduler, sin dispararlos manualmente. En la lista deben figurar `scheduled__...` con estado `success`; las primeras tres fechas lógicas están separadas cinco minutos. El primer run crea pronósticos y pedidos, el tercero incorpora las primeras ventas objetivo al monitoreo, sin crear otro pronóstico ni pedido:
+
+```bash
+for attempt in {1..50}; do
+  SCHEDULED_OK=$(docker compose -p "$PROJECT" exec -T airflow-scheduler airflow dags list-runs -o json inventory_operational_flow | python -c 'import json,sys; print(sum(r["state"] == "success" and r["run_id"].startswith("scheduled__") for r in json.load(sys.stdin)))')
+  printf 'Runs programados exitosos: %s\n' "$SCHEDULED_OK"
+  if test "$SCHEDULED_OK" -ge 3; then break; fi
+  sleep 30
+done
+test "$SCHEDULED_OK" -ge 3
+docker compose -p "$PROJECT" exec airflow-scheduler airflow dags list-runs inventory_operational_flow
+test -f data/published/forecasts/weekly-20170725-20170724T060000Z.json
+test -f data/published/orders/weekly-20170725-20170724T060000Z.json
+test -f data/published/monitoring/weekly-20170725-20170724T060000Z/2017-07-26T060000.000000Z.json
+```
+
+Pausa y detén **solo** el proyecto de esta prueba; no uses `down -v` si quieres conservar sus artefactos. Para otra semana histórica, configura otro primer corte UTC a las 06:00 y prepara previamente sus observaciones de entrenamiento. `WALL_START_AT` debe ser un tick UTC futuro alineado con el intervalo; `TICK_MINUTES` puede ser 1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30 o 60, y `TICKS` entre 1 y 366. Si Compose estuvo detenido, `catchup=True` recupera en orden los ticks pendientes dentro del límite; pausa antes de detenerlo si no quieres esa recuperación. Los runs manuales continúan aceptando `dag_run.conf` explícito para backfill y correcciones externas. Para desactivar también el calendario en un reinicio, cambia `INVENTORY_SIMULATION_ENABLED=false` en tu `.env` local.
+
+```bash
+docker compose -p "$PROJECT" exec airflow-scheduler airflow dags pause inventory_operational_flow
+docker compose -p "$PROJECT" down
+```
+
 #### Demostración con instantánea histórica DVC
 
 Para una ejecución histórica de una serie desde los objetos DVC, copia la instantánea recuperada a un directorio local excluido de Git, omitiendo el catálogo inicial para que la tarea `produce` lo genere desde `stores.csv`. La copia preserva el resto del historial y evita volver a crear 65 días de entregas:
@@ -308,7 +362,7 @@ docker compose run --rm -e INVENTORY_INBOX_DIR=/opt/airflow/state/operational-de
 docker compose start airflow-scheduler
 ```
 
-El monitoreo recorre las publicaciones guardadas y crea un nuevo reporte únicamente cuando cambia la revisión de ventas de alguna fecha objetivo, o cuando aún no existe reporte; también revisa publicaciones ya evaluadas para captar correcciones. No convierte faltantes en cero. Una revisión externa completa de `train` con `available_at` posterior se incorpora con otro `refresh` al nuevo corte; el productor actual solo crea la revisión inicial de `train`. Un segundo run idéntico conserva entregas y artefactos; un conflicto para un mismo corte falla sin sobrescribir. Para backfill, ejecuta los cortes en orden cronológico y conserva la bandeja, los reportes y los CSV de corrección externos. `airflow dags test` debe ejecutarse con el scheduler detenido para evitar que ambos intenten procesar el mismo run; para ejecuciones normales usa `airflow dags trigger` con el scheduler activo y los montajes predeterminados. En modo `real`, el primer monitoreo requiere un corte posterior a la hora real de publicación; si aún no existe, un `refresh` posterior lo evaluará. El flujo sigue siendo **manual**: no hay calendario, eventos automáticos de llegada, espera por lotes tardíos ni activación desde servicios externos. Véase [DEC-017](DECISIONES.md).
+El monitoreo recorre las publicaciones guardadas y crea un nuevo reporte únicamente cuando cambia la revisión de ventas de alguna fecha objetivo, o cuando aún no existe reporte; también revisa publicaciones ya evaluadas para captar correcciones. No convierte faltantes en cero. Una revisión externa completa de `train` con `available_at` posterior se incorpora con otro `refresh` al nuevo corte; el productor actual solo crea la revisión inicial de `train`. Un segundo run idéntico conserva entregas y artefactos; un conflicto para un mismo corte falla sin sobrescribir. Para backfill, ejecuta los cortes en orden cronológico y conserva la bandeja, los reportes y los CSV de corrección externos. `airflow dags test` debe ejecutarse con el scheduler detenido para evitar que ambos intenten procesar el mismo run; para ejecuciones normales usa `airflow dags trigger` con el scheduler activo y los montajes predeterminados. En modo `real`, el primer monitoreo requiere un corte posterior a la hora real de publicación; si aún no existe, un `refresh` posterior lo evaluará. La única programación disponible es la simulación histórica optativa descrita arriba; no hay eventos automáticos de llegada, espera por lotes tardíos ni activación desde servicios externos. Véanse [DEC-017 y DEC-018](DECISIONES.md).
 
 ## Datos originales
 
