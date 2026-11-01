@@ -305,8 +305,8 @@ class SelectedForecast:
     model_state_sha256: str
 
 
-def model_state_sha256(model: MeanBaseline | RidgeForecaster) -> str:
-    """Fingerprint the selected model state so later mutation cannot reuse its cutoff."""
+def model_state_payload(model: MeanBaseline | RidgeForecaster) -> dict:
+    """Return the complete safe JSON state used for the model fingerprint."""
     if type(model) is MeanBaseline:
         state = {"type": "mean_baseline"}
     elif type(model) is RidgeForecaster and all(
@@ -319,6 +319,12 @@ def model_state_sha256(model: MeanBaseline | RidgeForecaster) -> str:
         }
     else:
         raise ValueError("El modelo seleccionado no tiene un estado acreditable")
+    return state
+
+
+def model_state_sha256(model: MeanBaseline | RidgeForecaster) -> str:
+    """Fingerprint the selected model state so later mutation cannot reuse its cutoff."""
+    state = model_state_payload(model)
     encoded = json.dumps(state, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
@@ -343,6 +349,17 @@ class EvaluationResult:
     calibration_rows: int
     validation_rows: int
     test_rows: int
+    partitions: "EvaluationPartitions | None" = None
+
+
+@dataclass(frozen=True)
+class EvaluationPartitions:
+    """The exact supervised examples consumed by the temporal evaluation."""
+
+    train: tuple[ForecastExample, ...]
+    calibration: tuple[ForecastExample, ...]
+    selection: tuple[ForecastExample, ...]
+    test: tuple[ForecastExample, ...]
 
 
 def evaluate_models(inbox_dir: Path, train_start: date, validation_start: date,
@@ -421,4 +438,5 @@ def evaluate_models(inbox_dir: Path, train_start: date, validation_start: date,
         validation_baseline, validation_ml, test_baseline, test_ml,
         selected_model, selected_forecast, selection_start, test_start, ml.penalty,
         len(train), len(calibration), len(selection), len(test),
+        EvaluationPartitions(tuple(train), tuple(calibration), tuple(selection), tuple(test)),
     )
