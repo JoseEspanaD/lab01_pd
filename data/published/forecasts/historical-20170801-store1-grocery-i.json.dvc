@@ -1,0 +1,5 @@
+outs:
+- md5: 1980b5267132de39fe151d6bd4b798dd
+  size: 43286
+  hash: md5
+  path: historical-20170801-store1-grocery-i.json

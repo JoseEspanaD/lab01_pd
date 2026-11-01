@@ -1,0 +1,5 @@
+outs:
+- md5: 8c2a197f70142eb924ddbac269b0b6e7
+  size: 14089
+  hash: md5
+  path: processed.json
