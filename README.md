@@ -19,13 +19,16 @@ Los CSV y las entregas generadas están excluidos de Git. Los archivos `data/raw
 
 ## Requisitos e instalación
 
-Se requieren Python **3.12 o superior**, Git y DVC. `pytest` está declarado en `requirements-dev.txt`. Desde la raíz del repositorio:
+Se requieren Python **3.12 o superior** y Git. Para instalar el proyecto y DVC desde un clon nuevo:
 
 ```bash
+git clone https://github.com/JoseEspanaD/lab01_pd.git
+cd lab01_pd
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e .
 python -m pip install -r requirements-dev.txt
+python -m pip install dvc
 python -m pytest
 ```
 
@@ -33,7 +36,18 @@ Si se utiliza una versión posterior a 3.12, sustituye `python3.12` por el ejecu
 
 ## Datos originales
 
-Descarga los archivos de la competencia [Store Sales - Time Series Forecasting de Kaggle](https://www.kaggle.com/competitions/store-sales-time-series-forecasting/data). Kaggle puede requerir iniciar sesión y aceptar las reglas de la competencia. Extrae estos cinco archivos originales, sin renombrarlos ni editarlos, directamente en `data/raw/`:
+Git versiona el código, `.dvc/config` y los punteros `data/raw/*.csv.dvc`; DagsHub almacena los objetos de los CSV. El remoto HTTPS `dagshub` ya está configurado como predeterminado. Para recuperar los cinco archivos desde un clon, cada docente debe usar su propia cuenta y token de DagsHub. Configura la autenticación HTTP básica **local** y ejecuta la descarga desde la raíz del repositorio:
+
+```bash
+dvc remote modify --local dagshub auth basic
+dvc remote modify --local dagshub user TU_USUARIO_DAGSHUB
+dvc remote modify --local dagshub ask_password true
+dvc pull data/raw/*.csv.dvc
+```
+
+Cuando necesite acceder al remoto, DVC solicitará el token de DagsHub interactivamente como contraseña. Nunca lo compartas, lo incluyas en comandos ni lo subas a Git. `--local` escribe estos ajustes en `.dvc/config.local`, que está excluido de Git; no configures ahí una contraseña persistente. La recuperación autenticada de los cinco CSV se verificó con una segunda cuenta sin permisos de colaboración y una caché DVC vacía: `5 files fetched and 5 files added`; todos coincidieron en MD5 y tamaño con sus punteros. Una prueba de `dvc pull` anónimo devolvió HTTP 401, por lo que no se considera una vía de acceso verificada.
+
+También puedes obtener los CSV directamente de la competencia [Store Sales - Time Series Forecasting de Kaggle](https://www.kaggle.com/competitions/store-sales-time-series-forecasting/data), que puede requerir iniciar sesión y aceptar sus reglas. Extrae estos cinco archivos originales, sin renombrarlos ni editarlos, directamente en `data/raw/`:
 
 ```text
 data/raw/train.csv
@@ -43,9 +57,7 @@ data/raw/holidays_events.csv
 data/raw/stores.csv
 ```
 
-Los otros archivos de la descarga, como `test.csv` y `sample_submission.csv`, no forman parte de los cinco datasets versionados aquí. Cada archivo `.csv.dvc` registra la ruta y la huella del CSV esperado. Si se obtienen versiones o contenidos distintos, no coincidirán con esos metadatos.
-
-La configuración versionada `.dvc/config` no define un remoto. Un remoto local configurado en otra máquina no se recupera desde un clon limpio; por eso **no se puede asumir que `dvc pull` funcione**. Con un remoto accesible y los objetos publicados, DVC podría recuperar los datos; mientras no exista, se necesitan los CSV originales de Kaggle.
+Los otros archivos de la descarga, como `test.csv` y `sample_submission.csv`, no forman parte de los cinco datasets versionados aquí. Cada archivo `.csv.dvc` registra la ruta y la huella del CSV esperado. Si se obtienen versiones o contenidos distintos, no coincidirán con esos metadatos. Los datos procesados, modelos y pronósticos publicados todavía requieren versionado posterior con DVC.
 
 ## Entregas e ingesta actuales
 
