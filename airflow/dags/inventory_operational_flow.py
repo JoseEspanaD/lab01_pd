@@ -1,26 +1,41 @@
-"""Manual Airflow 3 chain for one point-in-time forecast or monitoring refresh."""
+"""Airflow 3 chain for manual runs and an optional historical simulation clock."""
 
 from datetime import timedelta
 
 from airflow.sdk import dag, get_current_context, task
 
+from inventory.operations.simulation_schedule import schedule_from_environment
+
+
+_simulation = schedule_from_environment()
+if _simulation is not None:
+    from airflow.timetables.trigger import CronTriggerTimetable
+
+    _timetable = CronTriggerTimetable(_simulation.cron, timezone="UTC")
+else:
+    _timetable = None
+
 
 @dag(
     dag_id="inventory_operational_flow",
-    schedule=None,
-    catchup=False,
+    schedule=_timetable,
+    start_date=(_simulation.wall_start_at if _simulation else None),
+    end_date=(_simulation.wall_end_at if _simulation else None),
+    catchup=bool(_simulation),
     max_active_runs=1,
     max_active_tasks=1,
     default_args={"retries": 1, "retry_delay": timedelta(minutes=1)},
-    is_paused_upon_creation=False,
+    is_paused_upon_creation=bool(_simulation),
     tags=["laboratorio", "operational"],
 )
 def inventory_operational_flow():
     @task
     def validate():
-        from inventory.operations.workflow import validate_run
+        from inventory.operations.simulation_schedule import resolve_run
 
-        return validate_run(get_current_context()["dag_run"].conf)
+        context = get_current_context()
+        run = context["dag_run"]
+        return resolve_run(run.conf, run.run_type, context.get("logical_date"), _simulation)
 
     @task
     def produce(plan):
@@ -86,7 +101,7 @@ def inventory_operational_flow():
             Path(os.environ["INVENTORY_PROCESSED_DIR"]),
             Path(os.environ["INVENTORY_PUBLISHED_DIR"]),
             Path(os.environ["INVENTORY_COSTS_PATH"]),
-            get_current_context()["dag_run"].conf,
+            plan["forecast_config"],
         )
 
     @task
