@@ -165,6 +165,133 @@ Las revisiones con `available_at` posterior a un corte no alteran su reporte; un
 
 El objeto opcional `production` contiene `observation_date` y, si corresponde, `source`, `revision`, `available_at` y `correction_path`. Al omitirlo, el DAG usa entregas históricas ya conservadas en la bandeja, útil para backfill. Al incluirlo, publica solamente esa fecha desde los cinco CSV originales (`source=all` por defecto) o una fuente; repetir una ejecución no duplica ni sustituye entregas. `correction_path` debe señalar un CSV completo montado en `/opt/airflow/lab/data/producer-input/`. La tarea `validate` comprueba los cortes antes de producir. Las operaciones vuelven a verificar sus insumos y rechazan conflictos retroactivos.
 
+#### Semana histórica nueva desde los cinco CSV originales
+
+Esta receta reproduce **2017-07-25 a 2017-07-31** desde un clon nuevo, sin `dvc pull` ni instantáneas preparadas. Requiere Python 3.12 o superior, Docker Engine y Compose, y los cinco CSV originales de Kaggle en un directorio local. `python3` debe apuntar a una versión compatible. Introduce la ruta de ese directorio cuando se solicite; los archivos se copian sin alterar su contenido. No copies `.env`, cachés, `data/inbox/`, `data/processed/`, `data/published/` ni `airflow/state/` de otra instalación.
+
+```bash
+git clone --branch main --single-branch https://github.com/JoseEspanaD/lab01_pd.git lab01_pd
+cd lab01_pd
+python3 --version
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
+python -m pip install -r requirements-dev.txt
+read -r -p 'Directorio con los cinco CSV originales: ' KAGGLE_CSV_DIR
+for name in train transactions oil holidays_events stores; do
+  test -f "$KAGGLE_CSV_DIR/$name.csv" || { printf 'Falta %s.csv\n' "$name"; exit 1; }
+done
+for name in train transactions oil holidays_events stores; do
+  cp -- "$KAGGLE_CSV_DIR/$name.csv" "data/raw/$name.csv"
+done
+python -m pytest -q
+```
+
+El nombre explícito `lab1jul25` aísla los contenedores y la red de Compose de otros clones. Comprueba que el puerto local 8080 esté libre antes de iniciar el servicio; `down` al final solo afecta a este proyecto. La bandeja comienza vacía salvo por `.gitkeep`.
+
+```bash
+python3 scripts/init_airflow_env.py
+docker compose -p lab1jul25 config --quiet
+docker compose -p lab1jul25 up -d
+curl -fsS http://127.0.0.1:8080/api/v2/monitor/health
+docker compose -p lab1jul25 exec airflow-dag-processor airflow dags list-import-errors
+```
+
+Produce las **58 fechas de observación** del 2017-05-27 al 2017-07-23. Son las necesarias para las variables históricas y las cuatro semanas de evaluación de este ejemplo. Cada fecha usa su propio corte D+1 a las 06:00 UTC; `stores` publica el catálogo inicial en T0. El bucle ejecuta la operación existente una vez por fecha en un solo contenedor, sin copiar resultados DVC ni regenerar los lotes anteriores. Lee `train.csv` completo en cada iteración y puede tardar varios minutos.
+
+```bash
+docker compose -p lab1jul25 run --rm --entrypoint python inventory-producer -c '
+from datetime import date, timedelta
+from pathlib import Path
+from inventory.operations.production import produce_for_date
+
+raw = Path("/opt/airflow/lab/data/raw")
+inbox = Path("/opt/airflow/lab/data/inbox")
+first, last = date(2017, 5, 27), date(2017, 7, 23)
+for offset in range((last - first).days + 1):
+    day = first + timedelta(days=offset)
+    cutoff = (day + timedelta(days=1)).isoformat() + "T06:00:00Z"
+    result = produce_for_date(day.isoformat(), cutoff, raw, inbox)
+    print(day, len(result["deliveries"]), flush=True)
+'
+```
+
+La semana objetivo empieza el **2017-07-25** y comparte el corte de pronóstico **2017-07-24 06:00 UTC**. Entrenamiento, calibración, selección y prueba empiezan el 4 y 18 de junio, y el 2 y 16 de julio, respectivamente; hay una semana de embargo entre bloques. El corte de reporte de prueba es también 2017-07-24 06:00 UTC. `historical_simulation` identifica una reconstrucción, no una publicación real de 2017. Con el scheduler activo, dispara el DAG y espera a que su run más reciente indique `success`:
+
+```bash
+FORECAST_CONF='{"mode":"forecast","forecast_start_date":"2017-07-25","cutoff_at":"2017-07-24T06:00:00Z","evaluation_at":"2017-07-25T06:00:00Z","train_start":"2017-06-04","validation_start":"2017-06-18","selection_start":"2017-07-02","test_start":"2017-07-16","last_test_start":"2017-07-16","report_cutoff_at":"2017-07-24T06:00:00Z","calibration_first_start":"2017-07-16","calibration_last_start":"2017-07-16","kind":"historical_simulation"}'
+wait_flow() {
+  while :; do
+    FLOW_STATE=$(docker compose -p lab1jul25 exec airflow-scheduler airflow dags list-runs -o json inventory_operational_flow | python -c 'import json,sys; print(json.load(sys.stdin)[0]["state"])')
+    printf 'Estado: %s\n' "$FLOW_STATE"
+    case "$FLOW_STATE" in success) return 0 ;; failed) return 1 ;; esac
+    sleep 5
+  done
+}
+docker compose -p lab1jul25 exec airflow-scheduler airflow dags trigger -c "$FORECAST_CONF" inventory_operational_flow
+wait_flow
+```
+
+Verifica los artefactos creados en este clon. Con los CSV originales de la prueba, deben aparecer 161 entregas seleccionadas, 89 100 filas preparadas, 12 474 pronósticos diarios, 1 782 recomendaciones semanales y un primer monitoreo con 12 474 pares pendientes. Los nombres de archivo identifican el corte y no contienen datos futuros.
+
+```bash
+python - <<'PY'
+import json
+from pathlib import Path
+
+def payload(path):
+    return json.loads(Path(path).read_text(encoding="utf-8"))["payload"]
+
+cut = "2017-07-24T060000Z"
+publication = "weekly-20170725-20170724T060000Z"
+ingestion = payload(f"data/processed/ingestion/{cut}.json")
+prepared = payload(f"data/processed/preparation/{cut}/2017-06-04_2017-07-24.json")
+forecasts = payload(f"data/published/forecasts/{publication}.json")
+orders = payload(f"data/published/orders/{publication}.json")
+initial = payload(f"data/published/monitoring/{publication}/2017-07-25T060000.000000Z.json")
+assert ingestion["cutoff_at"] == forecasts["prediction_cutoff_at"] == "2017-07-24T06:00:00+00:00"
+assert len(ingestion["selected_deliveries"]) == 161
+assert prepared["row_count"] == 89100
+assert len(forecasts["forecasts"]) == 12474
+assert orders["order_count"] == 1782
+assert initial["metrics"]["evaluated_pairs"] == 0
+assert initial["metrics"]["pending_pairs"] == 12474
+print("Ingesta, preparación, pronósticos, pedidos y monitoreo inicial: OK")
+PY
+```
+
+Para comprobar idempotencia, registra las huellas de esos cinco archivos, repite el mismo trigger y comprueba que no cambien. Después, un `refresh` produce las ventas del primer día objetivo, disponibles el **2017-07-26 06:00 UTC**, y crea un nuevo reporte de monitoreo sin recalcular el pronóstico:
+
+```bash
+ARTIFACTS=(
+  data/processed/ingestion/2017-07-24T060000Z.json
+  data/processed/preparation/2017-07-24T060000Z/2017-06-04_2017-07-24.json
+  data/published/forecasts/weekly-20170725-20170724T060000Z.json
+  data/published/orders/weekly-20170725-20170724T060000Z.json
+  data/published/monitoring/weekly-20170725-20170724T060000Z/2017-07-25T060000.000000Z.json
+)
+ARTIFACT_HASHES_BEFORE=$(sha256sum "${ARTIFACTS[@]}")
+docker compose -p lab1jul25 exec airflow-scheduler airflow dags trigger -c "$FORECAST_CONF" inventory_operational_flow
+wait_flow
+test "$ARTIFACT_HASHES_BEFORE" = "$(sha256sum "${ARTIFACTS[@]}")"
+docker compose -p lab1jul25 exec airflow-scheduler airflow dags trigger -c '{"mode":"refresh","evaluation_at":"2017-07-26T06:00:00Z","production":{"observation_date":"2017-07-25","source":"train"}}' inventory_operational_flow
+wait_flow
+python - <<'PY'
+import json
+from pathlib import Path
+
+path = Path("data/published/monitoring/weekly-20170725-20170724T060000Z/2017-07-26T060000.000000Z.json")
+metrics = json.loads(path.read_text(encoding="utf-8"))["payload"]["metrics"]
+assert (metrics["evaluated_pairs"], metrics["pending_pairs"]) == (1782, 10692)
+print(metrics)
+PY
+docker compose -p lab1jul25 down
+```
+
+La ejecución comprobada está descrita en [docs/reproduccion_clon_limpio.md](docs/reproduccion_clon_limpio.md). El productor procesa una fecha por llamada; no se ha probado una corrección de contenido con estos cinco CSV. Las disponibilidades D+1/T0 son supuestos de simulación, no registros de entrega reales de Kaggle.
+
+#### Demostración con instantánea histórica DVC
+
 Para una ejecución histórica de una serie desde los objetos DVC, copia la instantánea recuperada a un directorio local excluido de Git, omitiendo el catálogo inicial para que la tarea `produce` lo genere desde `stores.csv`. La copia preserva el resto del historial y evita volver a crear 65 días de entregas:
 
 ```bash
@@ -286,7 +413,7 @@ model, calibration = (
 forecasts = forecast_week(inbox, start, cutoff, model, calibration, result.costs)
 ```
 
-`config/forecast_costs.json` fija costos unitarios de subestimación y sobreestimación y exige una mejora relativa mínima del 5 %. El baseline es el vigente: Ridge solo lo reemplaza si en selección reduce el costo medio más que ese umbral y no aumenta MAE. La prueba se reserva para informar MAE, RMSE, costo medio, pérdida pinball y cobertura del intervalo 10–90 %. `evaluate_models` conserva en `result.partitions` las filas exactas de entrenamiento, calibración, selección y prueba, que la reproducción histórica persiste; `forecast_week` devuelve pronósticos en memoria. Los cuantiles son globales y pueden ser poco fiables con escasa calibración. Esta métrica es un costo diario de error de demanda, todavía no el costo de un pedido semanal con inventario. Falta integrar inventario, pedidos en tránsito y plazos de entrega para generar pedidos finales. El DAG de ingesta aún no ejecuta el flujo de pronósticos. El contrato completo se documenta en [DEC-003, DEC-004 y DEC-005](DECISIONES.md).
+`config/forecast_costs.json` fija costos unitarios de subestimación y sobreestimación y exige una mejora relativa mínima del 5 %. El baseline es el vigente: Ridge solo lo reemplaza si en selección reduce el costo medio más que ese umbral y no aumenta MAE. La prueba se reserva para informar MAE, RMSE, costo medio, pérdida pinball y cobertura del intervalo 10–90 %. `evaluate_models` conserva en `result.partitions` las filas exactas de entrenamiento, calibración, selección y prueba, que la reproducción histórica persiste; `forecast_week` devuelve pronósticos en memoria. Los cuantiles son globales y pueden ser poco fiables con escasa calibración. Esta métrica es un costo diario de error de demanda, todavía no el costo de un pedido semanal con inventario. Falta integrar inventario, pedidos en tránsito y plazos de entrega para generar pedidos finales. El DAG `inventory_operational_flow` encadena ingesta, preparación, pronósticos, pedidos y monitoreo; los DAGs de etapa siguen disponibles para ejecuciones manuales. El contrato completo se documenta en [DEC-003, DEC-004 y DEC-005](DECISIONES.md).
 
 ## Pedidos semanales sugeridos
 
