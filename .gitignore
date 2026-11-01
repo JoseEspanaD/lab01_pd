@@ -70,6 +70,8 @@ id_dsa
 # Logs
 *.log
 /logs/
+/airflow/state/
+/airflow/logs/
 
 # Datos, modelos y resultados generados. Los metadatos DVC sí se versionan.
 /data/**

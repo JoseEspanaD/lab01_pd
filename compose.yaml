@@ -1,0 +1,107 @@
+x-airflow-common: &airflow-common
+  image: apache/airflow:3.3.2-python3.12
+  user: "${AIRFLOW_UID:?Ejecuta python3 scripts/init_airflow_env.py}:0"
+  init: true
+  environment: &airflow-environment
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__PARALLELISM: "1"
+    AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: "1"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
+    AIRFLOW__DAG_PROCESSOR__PARSING_PROCESSES: "1"
+    AIRFLOW__API__WORKERS: "1"
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/state/airflow.db
+    AIRFLOW__LOGGING__BASE_LOG_FOLDER: /opt/airflow/logs
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /opt/airflow/state/simple_auth_manager_passwords.json.generated
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:?Ejecuta python3 scripts/init_airflow_env.py}
+    AIRFLOW__API__SECRET_KEY: ${AIRFLOW_API_SECRET_KEY:?Ejecuta python3 scripts/init_airflow_env.py}
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:?Ejecuta python3 scripts/init_airflow_env.py}
+    PYTHONPATH: /opt/airflow/src
+    INVENTORY_INBOX_DIR: /opt/airflow/lab/data/inbox
+    INVENTORY_RAW_DIR: /opt/airflow/lab/data/raw
+    INVENTORY_PRODUCER_INBOX_DIR: /opt/airflow/producer/inbox
+    INVENTORY_PROCESSED_DIR: /opt/airflow/lab/data/processed
+    INVENTORY_PUBLISHED_DIR: /opt/airflow/lab/data/published
+    INVENTORY_COSTS_PATH: /opt/airflow/lab/config/forecast_costs.json
+  volumes: &airflow-volumes
+    - ./airflow/dags:/opt/airflow/dags:ro
+    - ./src:/opt/airflow/src:ro
+    - ./config:/opt/airflow/lab/config:ro
+    - ./data/raw:/opt/airflow/lab/data/raw:ro
+    - ./data/inbox:/opt/airflow/lab/data/inbox:ro
+    - ./data/reproductions:/opt/airflow/lab/data/reproductions:ro
+    - ./models:/opt/airflow/lab/models:ro
+    - ./data/processed:/opt/airflow/lab/data/processed
+    - ./data/published:/opt/airflow/lab/data/published
+    - ./airflow/state:/opt/airflow/state
+    - ./airflow/logs:/opt/airflow/logs
+
+services:
+  inventory-producer:
+    image: apache/airflow:3.3.2-python3.12
+    user: "${AIRFLOW_UID:?Ejecuta python3 scripts/init_airflow_env.py}:0"
+    profiles: ["producer"]
+    entrypoint: ["python", "-m", "inventory.operations.production"]
+    environment:
+      PYTHONPATH: /opt/airflow/src
+      INVENTORY_RAW_DIR: /opt/airflow/lab/data/raw
+      INVENTORY_INBOX_DIR: /opt/airflow/lab/data/inbox
+    volumes:
+      - ./src:/opt/airflow/src:ro
+      - ./data/raw:/opt/airflow/lab/data/raw:ro
+      - ./data/producer-input:/opt/airflow/lab/data/producer-input:ro
+      - ./data/inbox:/opt/airflow/lab/data/inbox
+
+  airflow-init:
+    <<: *airflow-common
+    command: db migrate
+    restart: "no"
+
+  airflow-api-server:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags:ro
+      - ./src:/opt/airflow/src:ro
+      - ./config:/opt/airflow/lab/config:ro
+      - ./data/raw:/opt/airflow/lab/data/raw:ro
+      - ./data/producer-input:/opt/airflow/lab/data/producer-input:ro
+      - ./data/inbox:/opt/airflow/lab/data/inbox:ro
+      - ./data/inbox:/opt/airflow/producer/inbox
+      - ./data/reproductions:/opt/airflow/lab/data/reproductions:ro
+      - ./models:/opt/airflow/lab/models:ro
+      - ./data/processed:/opt/airflow/lab/data/processed
+      - ./data/published:/opt/airflow/lab/data/published
+      - ./airflow/state:/opt/airflow/state
+      - ./airflow/logs:/opt/airflow/logs
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      airflow-api-server:
+        condition: service_healthy
+    restart: unless-stopped
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
