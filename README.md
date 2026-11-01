@@ -5,13 +5,14 @@ Proyecto de Product Development con datos públicos de Corporación Favorita. El
 ## Estructura mínima
 
 ```text
-src/inventory/       Paquete Python: ingesta, preparación, pronósticos y pedidos sugeridos
+src/inventory/       Paquete Python: ingesta, preparación, pronósticos, pedidos y seguimiento
 tests/               Pruebas pytest con datos sintéticos
 data/raw/            Cinco CSV originales, asociados a archivos .dvc
 data/inbox/          Entregas simuladas e inmutables; entrada de solo lectura para la ingesta
+data/published/      Publicaciones y reportes inmutables; artefactos excluidos de Git
 data/processed/      Salidas derivadas previstas
 config/              Costos y umbral de reemplazo versionados
-DECISIONES.md        Contratos y decisiones de modelado (DEC-001 a DEC-006)
+DECISIONES.md        Contratos y decisiones de modelado (DEC-001 a DEC-007)
 ```
 
 Los CSV y las entregas generadas están excluidos de Git. Los archivos `data/raw/*.csv.dvc` sí se versionan.
@@ -124,7 +125,7 @@ model, calibration = (
 forecasts = forecast_week(inbox, start, cutoff, model, calibration, result.costs)
 ```
 
-`config/forecast_costs.json` fija costos unitarios de subestimación y sobreestimación y exige una mejora relativa mínima del 5 %. El baseline es el vigente: Ridge solo lo reemplaza si en selección reduce el costo medio más que ese umbral y no aumenta MAE. La prueba se reserva para informar MAE, RMSE, costo medio, pérdida pinball y cobertura del intervalo 10–90 %. Los modelos, resultados y pronósticos se mantienen en memoria; no se escriben datasets ni artefactos. Los cuantiles son globales y pueden ser poco fiables con escasa calibración. Esta métrica es un costo diario de error de demanda, todavía no el costo de un pedido semanal con inventario. Falta integrar inventario, pedidos en tránsito y plazos de entrega para generar pedidos finales. Tampoco hay un flujo de Airflow operativo. El contrato completo se documenta en [DEC-003, DEC-004 y DEC-005](DECISIONES.md).
+`config/forecast_costs.json` fija costos unitarios de subestimación y sobreestimación y exige una mejora relativa mínima del 5 %. El baseline es el vigente: Ridge solo lo reemplaza si en selección reduce el costo medio más que ese umbral y no aumenta MAE. La prueba se reserva para informar MAE, RMSE, costo medio, pérdida pinball y cobertura del intervalo 10–90 %. `evaluate_models` y `forecast_week` devuelven resultados en memoria; la publicación se realiza mediante el módulo descrito más abajo. Los cuantiles son globales y pueden ser poco fiables con escasa calibración. Esta métrica es un costo diario de error de demanda, todavía no el costo de un pedido semanal con inventario. Falta integrar inventario, pedidos en tránsito y plazos de entrega para generar pedidos finales. Tampoco hay un flujo de Airflow operativo. El contrato completo se documenta en [DEC-003, DEC-004 y DEC-005](DECISIONES.md).
 
 ## Pedidos semanales sugeridos
 
@@ -144,3 +145,33 @@ orders = suggest_weekly_orders(
 ```
 
 El ejemplo usa el `result`, `start` y `cutoff` definidos arriba. `evaluate_models` incorpora en `result.selected_forecast` el modelo elegido, su calibración diaria, el corte en que ya estaban disponibles las etiquetas para seleccionar el modelo y el corte de disponibilidad de la calibración diaria. También registra una huella del estado del modelo. `suggest_weekly_orders` exige ese resultado, comprueba ambas fechas contra **cada corte histórico** y el corte objetivo, y rechaza un modelo Ridge cuyo estado haya cambiado. Las fechas representan disponibilidad de la información en la simulación de entregas, no una fecha real de publicación del artefacto. Un `EvaluationResult` construido manualmente con metadatos falsos no ofrece esta garantía; use el devuelto por `evaluate_models`. Cada recomendación conserva ambas fechas y la huella para auditoría. La función reconstruye las etiquetas de calibración semanal al corte solicitado. Los costos de faltante y merma son una aproximación por unidad de demanda semanal insuficiente o excedente. Sin existencias, pedidos en tránsito, plazos de entrega ni vida útil, `suggested_units` **no es un pedido neto ejecutable**: supone disponibilidad de toda la cantidad al inicio de la semana y que el excedente se valora al final. La calibración semanal global puede ser inestable con pocas semanas o no representar bien una serie particular. Véase [DEC-006](DECISIONES.md).
+
+## Seguimiento de pronósticos publicados
+
+`publish_forecasts` genera los siete pronósticos diarios de cada tienda–familia para un único corte y los guarda en `data/published/forecasts/<publication_id>.json`. El identificador lo proporciona el proceso que publica: repetirlo con los mismos insumos devuelve el artefacto original; usarlo con contenido diferente produce un error de conflicto. El archivo contiene la hora UTC real de escritura, las predicciones, la procedencia lógica y huella del modelo, la fecha y huella de la calibración diaria, el contenido y huella de costos, y las rutas y huellas de las entregas seleccionadas al corte. `read_publication` verifica el esquema y la huella. Las escrituras son atómicas y no sustituyen archivos existentes. `data/published/` está excluido de Git y puede versionarse posteriormente con DVC.
+
+El modo predeterminado, `kind="real"`, toma la hora del reloj durante la escritura y solo admite publicar desde el corte de predicción hasta antes del primer día pronosticado. No acepta una fecha de publicación proporcionada por el llamador. Una reconstrucción retrospectiva exige `kind="historical_simulation"`: conserva la hora real de creación en `recorded_at`, deja `published_at=None` y permanece rotulada como simulación en los reportes. Guardar un artefacto local acredita su escritura, no demuestra entrega a un sistema externo. Para reconstruir el corte histórico del ejemplo anterior:
+
+```python
+from inventory.published_forecasts import publish_forecasts
+
+publication = publish_forecasts(
+    inbox, start, result, Path("config/forecast_costs.json"),
+    publication_id="weekly-20170815",
+    kind="historical_simulation",
+)
+```
+
+`evaluate_publication` lee **las predicciones guardadas**, sin recalcular el modelo, y usa `ingest_sales(inbox, evaluation_at)` para comparar solo las ventas visibles en ese instante UTC. Guarda un reporte por publicación y fecha de evaluación en `data/published/monitoring/`. Las filas sin venta quedan `pending`; una venta cero solo se puntúa cuando existe como registro real. El reporte incluye MAE, RMSE, sesgo medio (`venta − q50`), cobertura inclusiva del intervalo `q10`–`q90`, cantidad evaluada y pendiente. Si no hay observaciones, las cuatro métricas son `None`. Una corrección posterior crea un reporte nuevo al evaluarse con un corte posterior; los anteriores permanecen intactos. Repetir el mismo corte y las mismas ventas es idempotente; si el contenido visible para un corte ya reportado cambia por una entrega retroactiva, se rechaza el conflicto.
+
+```python
+from inventory.forecast_monitoring import evaluate_publication
+
+report = evaluate_publication(
+    inbox, publication.publication_id,
+    evaluation_at=datetime(2017, 8, 16, 6, tzinfo=timezone.utc),
+)
+print(report.metrics)
+```
+
+La fecha de disponibilidad de modelo y calibración procede de los cortes lógicos de `evaluate_models`, no de un registro externo de artefactos; su objeto en memoria puede falsificarse y el modelo y la calibración todavía no se conservan como artefactos independientes. El manifiesto de entregas identifica las entradas visibles para **la predicción al corte**, pero `EvaluationResult` no conserva un manifiesto completo de las versiones usadas al entrenar y seleccionar el modelo. Para reproducir una evaluación se necesitan la publicación y las entregas inmutables originales. Las huellas detectan cambios accidentales de contenido, pero la retención y recuperación entre máquinas requieren el futuro versionado de artefactos. Véase [DEC-007](DECISIONES.md).

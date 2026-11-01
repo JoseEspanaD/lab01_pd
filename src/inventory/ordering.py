@@ -61,6 +61,30 @@ def _require_available(artifact: SelectedForecast, cutoff_at: datetime) -> None:
         raise ValueError("El estado del modelo seleccionado cambió desde su evaluación")
 
 
+def require_evaluation_provenance(evaluation: EvaluationResult, cutoff_at: datetime) -> SelectedForecast:
+    """Validate the selected model and calibration against their evaluation cutoffs."""
+    if not isinstance(evaluation, EvaluationResult):
+        raise ValueError("Se requiere una evaluación con procedencia temporal acreditada")
+    selected = evaluation.selected_forecast
+    _require_available(selected, cutoff_at)
+    if (not isinstance(evaluation.selection_start, date)
+            or isinstance(evaluation.selection_start, datetime)
+            or not isinstance(evaluation.test_start, date)
+            or isinstance(evaluation.test_start, datetime)
+            or evaluation.selection_start >= evaluation.test_start
+            or selected.model_available_at != _prediction_cutoff(evaluation.test_start)
+            or selected.daily_calibration_available_at
+            != _prediction_cutoff(evaluation.selection_start)
+            or selected.name != evaluation.selected_model
+            or selected.model is not (
+                evaluation.ml if evaluation.selected_model == "ml" else evaluation.baseline)
+            or selected.daily_calibration is not (
+                evaluation.ml_calibration if evaluation.selected_model == "ml"
+                else evaluation.baseline_calibration)):
+        raise ValueError("El modelo seleccionado y su procedencia temporal no coinciden")
+    return selected
+
+
 def _group_forecasts(forecasts: list[Forecast]) -> dict[tuple[date, int, str], list[Forecast]]:
     groups: dict[tuple[date, int, str], list[Forecast]] = {}
     for forecast in forecasts:
@@ -181,25 +205,7 @@ def suggest_weekly_orders(
         raise ValueError("cutoff_at debe ser el corte semanal de predicción")
     if calibration_last_start + timedelta(days=6) >= cutoff_at.date():
         raise ValueError("La calibración requiere semanas terminadas antes del corte")
-    if not isinstance(evaluation, EvaluationResult):
-        raise ValueError("Se requiere una evaluación con procedencia temporal acreditada")
-    selected_forecast = evaluation.selected_forecast
-    _require_available(selected_forecast, cutoff_at)
-    if (not isinstance(evaluation.selection_start, date)
-            or isinstance(evaluation.selection_start, datetime)
-            or not isinstance(evaluation.test_start, date)
-            or isinstance(evaluation.test_start, datetime)
-            or evaluation.selection_start >= evaluation.test_start
-            or selected_forecast.model_available_at != _prediction_cutoff(evaluation.test_start)
-            or selected_forecast.daily_calibration_available_at
-            != _prediction_cutoff(evaluation.selection_start)
-            or selected_forecast.name != evaluation.selected_model
-            or selected_forecast.model is not (
-                evaluation.ml if evaluation.selected_model == "ml" else evaluation.baseline)
-            or selected_forecast.daily_calibration is not (
-                evaluation.ml_calibration if evaluation.selected_model == "ml"
-                else evaluation.baseline_calibration)):
-        raise ValueError("El modelo seleccionado y su procedencia temporal no coinciden")
+    selected_forecast = require_evaluation_provenance(evaluation, cutoff_at)
     costs = load_costs(costs_path)
     forecasts = forecast_week(
         inbox_dir, start_date, cutoff_at,
