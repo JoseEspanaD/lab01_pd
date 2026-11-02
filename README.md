@@ -22,6 +22,8 @@ DECISIONES.md        Contratos y decisiones técnicas
 
 Los CSV y los artefactos generados están excluidos de Git. Los punteros `.dvc` sí se versionan; DagsHub almacena los objetos.
 
+Las [evidencias de entrega](docs/evidencias_entrega_lab1.md) reúnen la comparación temporal baseline/Ridge, capturas auténticas de Airflow y el seguimiento de la semana reproducida desde un clon limpio.
+
 ## Requisitos e instalación
 
 Se requieren Python **3.12 o superior** y Git. Para instalar el proyecto y DVC desde un clon nuevo:
