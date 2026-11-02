@@ -535,3 +535,41 @@ python -m scripts.verify_integrated_lineage
 `dvc pull` recupera los cinco CSV y los cinco artefactos de la demostración desde DagsHub. El manifiesto DVC original conserva el SHA del commit de la rama `10d0db2`; GitHub integró ese contenido mediante Squash and merge en `3707bd5`. La referencia adicional `lineage/historical-20170801-store1-grocery-i.json` vincula el manifiesto original por su SHA-256 al commit integrado, sin alterar el artefacto histórico. El nuevo verificador exige que `3707bd5` sea antecesor del checkout y que **cada archivo de código** de ese commit y del espacio de trabajo coincida con las huellas del manifiesto. Si el commit original de la rama está disponible, también comprueba su contenido. Después ejecuta todas las verificaciones existentes de punteros, lotes, particiones, modelo, calibración y siete predicciones. El resultado esperado es `forecast_rows: 7`, `cutoff_at: 2017-07-31T06:00:00+00:00`, `selected_model: baseline` e `integrated_git_commit: 3707bd575870f01475ebfe202fd52897c9518395`. En los siete días archivados, `q50` es **2368.285714** al redondear a seis decimales. No reescribe la publicación. Si un objeto no se recupera, consulta el acceso a DagsHub de tu cuenta; la lectura anónima con `dvc pull` no se ha verificado y devolvió HTTP 401 en la prueba previa.
 
 Para construir localmente la demostración desde los cinco CSV originales de Kaggle que coincidan con sus `.dvc`, ejecuta `python -m inventory.historical_reproduction build`. El comando procesa `train.csv` en una sola pasada y escribe la instantánea en `data/reproductions/`, fuera de la bandeja operativa `data/inbox/`; repetirlo con las mismas entradas es idempotente, mientras una diferencia se rechaza. Para registrar una ejecución nueva con DVC, aplica `dvc add` a `inbox`, `processed.json`, el JSON del modelo y el JSON de la publicación, en ese orden. Cuando exista el commit de código, fija su SHA mediante `python -m inventory.historical_reproduction manifest --source-git-commit SHA_COMMIT_CODIGO` y ejecuta `dvc add data/reproductions/historical-20170801-store1-grocery-i/manifest.json`. Un borrador local sin SHA se puede finalizar una sola vez si sus demás referencias no cambiaron; un manifiesto ya finalizado no se sustituye. Si el PR se integra con Squash and merge, el SHA de la rama deja de ser antecesor de `main`: conserva ese manifiesto y añade una referencia pequeña al commit integrado que compruebe el hash del manifiesto y el contenido del código, como hace esta demostración. Esta referencia se registra **después** del merge, evitando que su propio SHA dependa del commit que la contiene. Ningún comando de reproducción requiere Airflow.
+
+## DVC de un período operativo de Airflow
+
+El flujo de pronóstico guarda ahora `data/published/model_states/<publication_id>.json` de forma inmutable. Contiene el estado del modelo **seleccionado** por la regla existente, los residuos de calibración diaria y semanal, métricas y cortes de disponibilidad. Sus huellas se comprueban contra el pronóstico y los pedidos publicados. No modifica la selección baseline/Ridge. Para congelar un período deben haber terminado el run de pronóstico y el `refresh` que produjo el reporte de monitoreo deseado. Por ejemplo, después de la receta «Semana histórica nueva desde los cinco CSV originales», con evaluación del **2017-07-26 06:00 UTC**:
+
+```bash
+PUBLICATION_ID=weekly-20170725-20170724T060000Z
+EVALUATION_AT=2017-07-26T06:00:00Z
+ARCHIVE=data/reproductions/operational/${PUBLICATION_ID}__eval-20170726T060000Z
+python -m inventory.operations.operational_archive freeze \
+  --publication-id "$PUBLICATION_ID" --evaluation-at "$EVALUATION_AT"
+python -m inventory.operations.operational_archive verify --archive "$ARCHIVE"
+dvc add "$ARCHIVE"
+dvc status
+```
+
+La congelación copia solo lotes y revisiones con `available_at` no posterior al corte de evaluación; el manifiesto distingue cuáles estaban disponibles en el corte anterior de pronóstico. Incluye ingesta, preparación, modelo, pronósticos, pedidos y **un reporte** de monitoreo, con SHA-256 de cada archivo, de los cinco punteros DVC originales, del código y de costos. Se verifica antes de aceptar la carpeta. Repetir el comando con los mismos insumos conserva sus bytes y fechas; una corrección retroactiva o un archivo distinto bajo el mismo identificador causa conflicto. Para otro corte de monitoreo se crea otra carpeta, sin modificar la anterior. DVC trabaja con la copia cerrada y no ejecuta `checkout` ni `add` sobre la bandeja o las publicaciones vivas de Airflow.
+
+Después de revisar el puntero generado, un PR debe incorporar **solo** `"$ARCHIVE.dvc"` y el código/documentación; los JSON y CSV de la carpeta permanecen fuera de Git. Publicar los objetos DVC requiere una autorización de escritura en DagsHub. Usa la autenticación local descrita en «Datos originales» y, cuando corresponda publicar, ejecuta:
+
+```bash
+dvc push "$ARCHIVE.dvc"
+```
+
+Desde un clon limpio de la revisión que incluya ese puntero, instala el paquete y DVC como se indicó al inicio. Usa tu propia cuenta de DagsHub; el token se solicita de forma interactiva y no se guarda en Git. Para recuperar y comprobar el mismo período:
+
+```bash
+dvc remote modify --local dagshub auth basic
+dvc remote modify --local dagshub user TU_USUARIO_DAGSHUB
+dvc remote modify --local dagshub ask_password true
+PUBLICATION_ID=weekly-20170725-20170724T060000Z
+ARCHIVE=data/reproductions/operational/${PUBLICATION_ID}__eval-20170726T060000Z
+dvc pull
+dvc status
+python -m inventory.operations.operational_archive verify --archive "$ARCHIVE"
+```
+
+El verificador vuelve a calcular la evaluación temporal, los pronósticos, pedidos y monitoreo desde la instantánea, sin reescribir una publicación. Exige el mismo código y configuración registrados en el manifiesto; para una versión posterior del repositorio usa el commit o tag que incorporó el puntero. El remoto DVC actual requiere autenticación para lectura. El archivo operativo solo queda recuperable desde DagsHub después de que su objeto se haya enviado con `dvc push` y su puntero forme parte de la revisión clonada. Véase [DEC-019](DECISIONES.md).

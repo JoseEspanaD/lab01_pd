@@ -10,6 +10,7 @@ from pathlib import Path
 from inventory.data_preparation import _prediction_cutoff, prepare_forecast_examples
 from inventory.forecasting import evaluate_models
 from inventory.operations.ingestion import parse_cutoff_at
+from inventory.operations.model_record import record_model
 from inventory.operations.preparation import _date, _history_references, _selected_references
 from inventory.ordering import suggest_weekly_orders
 from inventory.published_forecasts import (
@@ -162,6 +163,11 @@ def publish_weekly_plan(
     }
     order_path = published_dir / "orders" / f"{publication_id}.json"
     _write_immutable(order_path, payload)
+    model_path = record_model(
+        inbox_dir, published_dir, costs_path, publication_id, target, cutoff,
+        evaluation, splits["calibration_first_start"],
+        splits["calibration_last_start"], orders,
+    )
     return {"publication_id": publication_id, "cutoff_at": cutoff.isoformat(),
             "forecast_rows": len(publication.forecasts), "order_count": len(orders),
-            "orders_path": str(order_path)}
+            "orders_path": str(order_path), "model_path": str(model_path)}
